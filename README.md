@@ -222,188 +222,134 @@ Podría ser:
 
 ### 7.1. Helper/Middleware
 
-Se crea un helper en el repo de Next.js, por ejemplo:
+**`resolveAuthContext(req)`**
 
-```ts
-async function authorize(req, requiredPermission: string) {
-  const authContext = await resolveAuthContext(req);
-  // authContext = { userId, source: "gcp" | "token" }
+- Detecta si el request viene con:
+  - Sesión de NextAuth (GCP), o
+  - Token de servicio.
+- Devuelve:
+  - `userId`
+  - Tipo de auth (`source`: `"gcp"` \| `"token"`).
 
-  const permissions = await getPermissionsForUser(authContext.userId);
+**`getPermissionsForUser(userId)`**
 
-  const allowed = permissions.has(requiredPermission);
-  logAccessAudit({ authContext, requiredPermission, allowed });
+- Lee roles de `BackofficeUserRoles`.
+- Lee permisos de `BackofficeRoles`.
+- Construye la **unión de todos los permisos**.
+- Sin cache, tal como acordado (pocos usuarios / pocas requests).
 
-  if (!allowed) {
-    throw new ForbiddenError(); // 403
-  }
-}
-resolveAuthContext(req)
+---
 
-Detecta si el request viene con sesión de NextAuth (GCP) o con token de servicio.
+### 7.2. Protección de endpoints
 
-Devuelve userId + tipo de auth (source).
+En cada endpoint crítico del Backoffice se invoca `authorize` con el permiso adecuado:
 
-getPermissionsForUser(userId)
+- Endpoint `/api/balance`  
+  → `authorize(req, "balance:read")`
+- Endpoint que modifica algo en balance  
+  → `authorize(req, "balance:write")`
 
-Lee roles de BackofficeUserRoles.
+**Política de seguridad:**
 
-Lee permisos de BackofficeRoles.
+- Si el usuario no tiene ningún rol → no puede hacer nada → **HTTP 403**.
+- Si el usuario no tiene el permiso requerido → **HTTP 403**.
 
-Construye la unión de todos los permisos.
+---
 
-Sin cache, tal como acordado (pocos usuarios / pocas requests).
+## 8. Frontend “Roles & Permisos”
 
-7.2. Protección de endpoints
+### 8.1. Funcionalidad mínima v1
 
-En cada endpoint crítico del Backoffice se invoca authorize con el permiso adecuado:
+**Vista de Roles**
 
-Endpoint /api/balance → authorize(req, "balance:read").
+- Listar roles existentes.
+- Crear rol nuevo:
+  - Nombre
+  - Descripción
+  - Selección de permisos
+- Editar rol (actualizar permisos).
 
-Endpoint que modifica algo en balance → authorize(req, "balance:write").
+**Vista de Asignación de roles**
 
-Política de seguridad:
+- Buscar usuario:
+  - Por email, o
+  - Por id de servicio.
+- Ver roles asignados.
+- Agregar / quitar roles.
 
-Si el usuario no tiene ningún rol → no puede hacer nada → HTTP 403.
+### 8.2. Backend asociado
 
-Si el usuario no tiene el permiso requerido → HTTP 403.
+**Endpoints mínimos:**
 
-8. Frontend “Roles & Permisos”
-8.1. Funcionalidad mínima v1
+- `GET /api/rbac/roles`
+- `POST /api/rbac/roles`
+- `PUT /api/rbac/roles/{roleId}`
+- `DELETE /api/rbac/roles/{roleId}` (soft-delete si aplica)
+- `GET /api/rbac/users/{userId}/roles`
+- `POST /api/rbac/users/{userId}/roles`
+- `DELETE /api/rbac/users/{userId}/roles/{roleId}`
 
-Vista de Roles:
+> El acceso a estos endpoints debe estar protegido, por ejemplo con un rol `BACKOFFICE_ADMIN` o similar.
 
-Listar roles existentes.
+---
 
-Crear rol nuevo:
-
-Nombre
-
-Descripción
-
-Selección de permisos
-
-Editar rol (actualizar permisos).
-
-Vista de Asignación de roles:
-
-Buscar usuario:
-
-Por email, o
-
-Por id de servicio.
-
-Ver roles asignados.
-
-Agregar / quitar roles.
-
-8.2. Backend asociado
-
-Endpoints mínimos:
-
-GET /api/rbac/roles
-
-POST /api/rbac/roles
-
-PUT /api/rbac/roles/{roleId}
-
-DELETE /api/rbac/roles/{roleId} (soft-delete si aplica)
-
-GET /api/rbac/users/{userId}/roles
-
-POST /api/rbac/users/{userId}/roles
-
-DELETE /api/rbac/users/{userId}/roles/{roleId}
-
-Acceso a estos endpoints debe estar protegido, por ejemplo con un rol BACKOFFICE_ADMIN o similar.
-
-9. Observabilidad / Logs (Datadog)
+## 9. Observabilidad / Logs (Datadog)
 
 Aunque la implementación completa está fuera de alcance v1, se deja el diseño:
 
-Cada vez que se ejecuta authorize():
+Cada vez que se ejecuta `authorize()` se genera un **log estructurado** con:
 
-Se genera un log estructurado con:
+- `userId` / `accountType` (humano vs servicio).
+- `permission` requerido.
+- `endpoint`.
+- `decision` (`allowed` / `denied`).
+- `timestamp`, `requestId`.
 
-userId / accountType (humano vs servicio).
+El Backoffice ya envía logs a **stdout** → desde EKS se pueden enviar a **Datadog**.
 
-permission requerido.
+A futuro se pueden crear dashboards con:
 
-endpoint.
+- Conteo de `denied` / `allowed`.
+- Top usuarios.
+- Otros indicadores relevantes.
 
-decision (allowed / denied).
+---
 
-timestamp, requestId.
+## 10. Plan de trabajo (3 días)
 
-El Backoffice ya envía logs a stdout → desde EKS se pueden enviar a Datadog.
+### Día 1 – Diseño detallado + backend base
 
-A futuro:
+- Documentar lista inicial de módulos y permisos (`<modulo>:read/write`).
+- Definir estructura final de tablas Dynamo (`BackofficeRoles` y `BackofficeUserRoles`) y crearlas.
+- Implementar funciones backend:
+  - `getRoles()`, `createRole()`, `updateRole()`.
+  - `getUserRoles(userId)`, `assignRole(userId, roleId)`, `removeUserRole(...)`.
+- Implementar `getPermissionsForUser(userId)` sin cache.
+- Definir e implementar esquema de tokens de servicio a nivel backend:
+  - Tabla/config de tokens.
+  - Función para mapear token → `userId` de servicio.
 
-Crear dashboards con:
+### Día 2 – Enforcement + UI básica
 
-Conteo de denied / allowed.
+- Implementar `resolveAuthContext(req)`:
+  - Detectar sesión GCP/NextAuth.
+  - Detectar token de servicio en header.
+- Implementar helper/middleware `authorize(req, permission)`.
+- Integrar `authorize` en endpoints críticos de **BALANCE** y **CHAT**.
+- Crear API `/api/rbac/...` para administración de roles y user-roles.
+- Implementar página de **Roles** en el Backoffice:
+  - Listado.
+  - Creación/edición básica.
 
-Top usuarios.
+### Día 3 – Asignación de roles, tests y despliegue
 
-Etc.
-
-10. Plan de trabajo (3 días)
-Día 1 – Diseño detallado + backend base
-
-Documentar lista inicial de módulos y permisos (<modulo>:read/write).
-
-Definir estructura final de tablas Dynamo (BackofficeRoles y BackofficeUserRoles) y crearlas.
-
-Implementar funciones backend:
-
-getRoles(), createRole(), updateRole().
-
-getUserRoles(userId), assignRole(userId, roleId), removeUserRole(...).
-
-Implementar getPermissionsForUser(userId) sin cache.
-
-Definir e implementar esquema de tokens de servicio a nivel backend:
-
-Tabla/config de tokens.
-
-Función para mapear token → userId de servicio.
-
-Día 2 – Enforcement + UI básica
-
-Implementar resolveAuthContext(req):
-
-Detectar sesión GCP/NextAuth.
-
-Detectar token de servicio en header.
-
-Implementar helper/middleware authorize(req, permission).
-
-Integrar authorize en endpoints críticos de BALANCE y CHAT.
-
-Crear API /api/rbac/... para administración de roles y user-roles.
-
-Implementar página de Roles en el Backoffice:
-
-Listado + creación/edición básica.
-
-Día 3 – Asignación de roles, tests y despliegue
-
-Implementar página de Asignación de roles a usuarios/service accounts.
-
-Probar flujos completos:
-
-Usuario sin roles → puede loguear, pero no acceder a módulos (403).
-
-Usuario con rol BALANCE_READONLY → solo balance:read.
-
-Token de servicio con rol correspondiente → puede invocar APIs vía token.
-
-Agregar logs básicos en authorize() listos para ser recogidos por Datadog.
-
-Revisar seguridad básica:
-
-No exponer endpoints de administración sin permisos.
-
-Asegurar que tokens de servicio no se loguean enteros en los logs.
-
-Despliegue a producción antes del viernes, validación smoke.
+- Implementar página de **Asignación de roles** a usuarios/service accounts.
+- Probar flujos completos:
+  - Usuario sin roles → puede loguear, pero no acceder a módulos (**403**).
+  - Usuario con rol `BALANCE_READONLY` → solo `balance:read`.
+  - Token de servicio con rol correspondiente → puede invocar APIs vía token.
+- Agregar logs básicos en `authorize()` listos para ser recogidos por Datadog.
+- Revisar seguridad básica:
+  - No exponer endpoints de administración sin permisos.
+  - Asegurar que tokens de servicio **no se loguean enteros** en los logs.
+- Despliegue a producción antes del viernes, con validación smoke.
